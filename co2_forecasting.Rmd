@@ -1,0 +1,591 @@
+---
+title: "CO2 Time Series Analysis and Forecasting"
+author: "Finotti, Lutz, Cheung, Chaiken"
+date: "March 2025"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fpp3)
+library(nortest)
+library(gridExtra)
+```
+------------------------------------------------------------------------
+
+# Load & Clean Data
+```{r, warning = F, message = F}
+file <- "data/monthly_in_situ_co2_mlo.dat"
+data_raw <- read_table(file, skip = 64, col_names = FALSE)
+names(data_raw) <- c("Year", "Month", "Date1", "Date2", "CO2", "seasonally_adjusted", 
+                     "fit", "seasonally_adjusted_fit", "CO2_filled", 
+                     "seasonally_adjusted_filled", "Station")
+```
+
+------------------------------------------------------------------------
+
+# CO2 to Temperature Anomaly
+```{r}
+S = 2.37 # Climate sensitivity factor
+initial_anomaly = 0.07 + 0.19 # Baseline temperature anomaly
+CO2_contribution = 0.7
+
+data_table <- data_raw %>% 
+  filter(Year > 1958 & Year < 2020) %>%
+  select(Month, CO2_filled) %>%
+  mutate(Time = row_number(),
+         c0 = lag(CO2_filled, n = 1),
+         delta_CO2 = CO2_filled - c0,
+         delta_Temp = S*log2((c0+delta_CO2)/c0),
+         Forecasted_Avg_Global_Temp_Anomaly = initial_anomaly + cumsum(replace_na(delta_Temp,0)),
+  )
+```
+
+------------------------------------------------------------------------
+
+# Summary of Climate Data (check)
+```{r}
+observed_anomaly = 1.11 + 0.19
+forecasted_anomaly = tail(data_table$Forecasted_Avg_Global_Temp_Anomaly,1)
+anomaly_difference = observed_anomaly - forecasted_anomaly
+
+forecasted_warming = sum(data_table$delta_Temp,na.rm=TRUE)
+actual_warming = observed_anomaly - initial_anomaly
+warming_difference = actual_warming - forecasted_warming
+
+# Print all key data points in one single block
+cat("\n---------------- Climate Model Forecast vs. Observed Data ----------------\n",
+    sprintf(" %-40s : % .7f °C\n", "Observed Anomaly (Observed, Dec 2019)", observed_anomaly),
+    sprintf(" %-40s : % .7f °C\n", "Forecasted Anomaly (CO2-Only, 100%)", forecasted_anomaly),
+    sprintf(" %-40s : % .7f °C\n", "Anomaly Difference", anomaly_difference), "\n",
+    
+    sprintf(" %-40s : % .7f °C\n", "Forecasted Warming (CO2-Only)", forecasted_warming),
+    sprintf(" %-40s : % .7f °C\n", "Actual Warming (Observed)", actual_warming),
+    sprintf(" %-40s : % .7f °C\n", "Warming Difference", warming_difference), "\n"
+)
+```
+
+------------------------------------------------------------------------
+
+# Convert to Time Series
+```{r}
+data_table_ts <- tsibble(Month_index = yearmonth(seq(as.Date("1959-01-15"), 
+                                                     as.Date("2019-12-15"), 
+                                                     by = "1 month")),
+                         Time = data_table$Time, 
+                         Month = data_table$Month,
+                         CO2 = data_table$CO2_filled,
+                         index = Month_index)
+```
+
+------------------------------------------------------------------------
+
+# Plot CO2 and Temperature Anomaly 
+```{r, fig.width=15, fig.height=8}
+data_table_original <- tsibble(Month_index = yearmonth(seq(as.Date("1959-01-15"), 
+                                                           as.Date("2019-12-15"), 
+                                                           by = "1 month")),
+                         Time = data_table$Time, 
+                         Month = data_table$Month,
+                         CO2 = data_table$CO2_filled,
+                         c0 = data_table$c0,
+                         delta_CO2 = data_table$delta_CO2,
+                         delta_Temp =  data_table$delta_Temp,
+                         Forecasted_Avg_Global_Temp_Anomaly =  data_table$Forecasted_Avg_Global_Temp_Anomaly,
+                         index = Month_index)
+
+#Convert month in data_table_ts from a number to a factor for color coding purposes
+data_table_ts$Month <- as.factor(data_table_ts$Month)
+head(data_table_ts)
+#Plot CO2 vs. Time
+co2_plot <- data_table_ts %>% autoplot(CO2) +
+  geom_point(aes(y=CO2, color=Month), size = 1) +
+  scale_color_manual(values = c("black", "blue", "purple", "red", "orange", "darkred", "green", "chartreuse4", 
+                                "chocolate", "gray60", "gold4", "salmon")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  ggtitle("CO2 vs. Time") + xlab("Time") + ylab("CO2")
+co2_plot
+#Plot temp anomaly vs. Time
+temp_plot <- data_table_original %>% autoplot(Forecasted_Avg_Global_Temp_Anomaly) +
+  geom_point(aes(y=Forecasted_Avg_Global_Temp_Anomaly, color=Month),size = 1) +
+  scale_color_manual(values = c("black", "blue", "purple", "red", "orange", "darkred", "green", "chartreuse4", 
+                                "chocolate", "gray60", "gold4", "salmon")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  ggtitle("Temp Anomaly vs. Time") + xlab("Time") + ylab("Temp Anomaly") +
+  
+  # Add Paris Agreement reference lines
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red", linewidth = 1) +  # 1.5°C Best Effort Limit
+  geom_hline(yintercept = 2.0, linetype = "dashed", color = "red", linewidth = 1) +  # 2.0°C Warming Limit
+  
+  # Add Labels for Paris Agreement Limits with more space
+  annotate("text", x = min(data_table$Time), y = 1.55, label = "1.5°C Best Effort", color = "red", hjust = 0, size = 4) +
+  annotate("text", x = min(data_table$Time), y = 2.05, label = "2.0°C Warming Limit", color = "red", hjust = 0, size = 4)
+temp_plot
+# Combine both plots in a single figure
+#grid.arrange(co2_plot, temp_plot, ncol = 1)
+```
+
+#Stationarity Check
+```{r}
+data_table_ts %>% ACF(CO2) %>% autoplot()
+unitroot_kpss(data_table_ts$CO2)
+```
+
+------------------------------------------------------------------------
+
+# STL Decomposition + ARIMA + SARIM
+```{r}
+result_dcmp_ARIMA_SARIMA <- data_table_ts %>%
+  model(decomposition_model(
+    STL(CO2 ~ season(window=23)),
+    ARIMA(season_adjust ~ pdq() + PDQ(0,0,0),  
+          stepwise=FALSE, approximation=FALSE, trace=FALSE), 
+    ARIMA(season_year ~ 0 + pdq(0,0,0) + PDQ(0,1,0))
+  ))
+
+report(result_dcmp_ARIMA_SARIMA)
+```
+------------------------------------------------------------------------
+
+# Residuals Analysis
+```{r}
+result_ARIMA_augment <- augment(result_dcmp_ARIMA_SARIMA)
+result_dcmp_ARIMA_SARIMA %>% augment() %>% ACF(.resid) %>% autoplot()
+result_dcmp_ARIMA_SARIMA %>% gg_tsresiduals()
+ad.test(result_ARIMA_augment$.resid)
+
+# add forecasts to data_table_ts
+data_table_ts$residuals <- result_ARIMA_augment$.resid #one step ahead in-sample forecast errors
+data_table_ts$forecasts <- result_ARIMA_augment$.fitted #one step ahead in-sample forecast of Y
+tail(data_table_ts)
+```
+------------------------------------------------------------------------
+
+# Forecast Future CO2 Levels until Present
+```{r, fig.width=15, fig.height=8}
+months_until_today <- 72 
+forecast_result_dcmp_ARIMA_SARIMA_today <- result_dcmp_ARIMA_SARIMA %>% 
+  forecast(h=months_until_today, point_forecast=list(.median=median))
+
+forecast_result_dcmp_ARIMA_SARIMA_today %>% autoplot(data_table_ts) +
+  geom_line(aes(y = result_ARIMA_augment$.fitted), color = "red", lty = 2) +
+  ggtitle("CO2 Forecast (Black: Observed, Red: Forecasted)") + 
+  xlab("Time") + ylab("CO2")
+```
+------------------------------------------------------------------------
+
+# Forecast Future CO2 Levels 20 Years (definition of climate)
+```{r, fig.width=15, fig.height=8}
+months_climate <- 240 # Forecast 20 years ahead
+forecast_result_dcmp_ARIMA_SARIMA_climate <- result_dcmp_ARIMA_SARIMA %>% 
+  forecast(h=months_climate, point_forecast=list(.median=median))
+
+forecast_result_dcmp_ARIMA_SARIMA_climate %>% autoplot(data_table_ts) +
+  geom_line(aes(y = result_ARIMA_augment$.fitted), color = "red", lty = 2) +
+  ggtitle("CO2 Forecast (20 Years)") + 
+  xlab("Time") + ylab("CO2")
+```
+------------------------------------------------------------------------
+#Focus forecasting plot on last 12 observations and forecasts
+
+```{r, fig.width=15, fig.height=8}
+forecast_result_dcmp_ARIMA_SARIMA_today %>% autoplot(data_table_ts[721:732,]) +
+  geom_point(aes(y = data_table_ts$CO2[721:732])) +
+  geom_line(aes(y = result_ARIMA_augment$.fitted[721:732]), color = "red", lty = 2) +
+  geom_point(aes(y = result_ARIMA_augment$.fitted[721:732]), color = "red") +
+  ggtitle("CO2 (Black represents CO2; Red represents one-step ahead in-sample forecasts)") + 
+  xlab("Time") + ylab("CO2") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+------------------------------------------------------------------------
+# Test how well temperature is modeled in-sample
+```{r, fig.width=15, fig.height=8}
+data_table_ts_temp <- data_table_ts %>%
+  mutate(
+    c0 = lag(forecasts, n = 1),
+    delta_CO2 = forecasts - c0,
+    delta_Temp = S*log2((c0+delta_CO2)/c0),
+    Forecasted_Avg_Global_Temp_Anomaly = initial_anomaly + cumsum(replace_na(delta_Temp,0))
+  )
+data_table_ts_temp
+
+observed_anomaly = 1.11 + 0.19
+forecasted_anomaly_2 = tail(data_table_ts_temp$Forecasted_Avg_Global_Temp_Anomaly,1)
+anomaly_difference_2 = observed_anomaly - forecasted_anomaly
+
+forecasted_warming_2 = sum(data_table$delta_Temp,na.rm=TRUE)
+actual_warming = observed_anomaly - initial_anomaly
+warming_difference_2 = actual_warming - forecasted_warming
+
+# Print all key data points in one single block
+cat("\n---------------- Climate Model Forecast vs. Observed Data ----------------\n",
+    sprintf(" %-40s : % .7f °C\n", "Observed Anomaly (Observed, Dec 2019)", observed_anomaly),
+    sprintf(" %-40s : % .7f °C\n", "Forecasted Anomaly (CO2-Only, 100%)", forecasted_anomaly_2),
+    sprintf(" %-40s : % .7f °C\n", "Anomaly Difference", anomaly_difference_2), "\n",
+    
+    sprintf(" %-40s : % .7f °C\n", "Forecasted Warming (CO2-Only)", forecasted_warming_2),
+    sprintf(" %-40s : % .7f °C\n", "Actual Warming (Observed)", actual_warming),
+    sprintf(" %-40s : % .7f °C\n", "Warming Difference", warming_difference_2), "\n"
+)
+```
+------------------------------------------------------------------------
+# Forecast and Print Temperature Anomalies for "Until Present," "20-year Climate Window," and "Zoomed in"
+```{r,fig.width=15, fig.height=8}
+# Forecast temperature anomalies for 20 year climate window
+
+starting_anomaly_end_of_historical = 1.17 + 0.19 #from GISS NASA
+
+months_climate <- 240 #until is 2/15/2039
+forecast_result_dcmp_ARIMA_SARIMA_climate <- result_dcmp_ARIMA_SARIMA %>% 
+  forecast(h=months_climate, point_forecast=list(.median=median))
+
+#forecast 95% confidence intervals for temperature anomaly
+
+forecast_result_dcmp_ARIMA_SARIMA_climate <- forecast_result_dcmp_ARIMA_SARIMA_climate %>% hilo(95) %>% select(-.model) %>%
+  unpack_hilo("95%") %>%
+  rename(CO2_lower = `95%_lower`, CO2_upper = `95%_upper`, CO2_median = .median)
+
+
+forecast_result_dcmp_ARIMA_SARIMA_climate <- forecast_result_dcmp_ARIMA_SARIMA_climate %>%
+  mutate(
+    Time = row_number(),
+    c0 = lag(CO2_median, n = 1),
+    delta_CO2 = CO2_median - c0,
+    delta_Temp = S*log2((c0+delta_CO2)/c0),
+    Forecasted_Avg_Global_Temp_Anomaly = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp,0)),
+    
+    # Lower 95% bound
+    c0_lower = lag(CO2_lower, n = 1),
+    delta_CO2_lower = CO2_lower - c0_lower,
+    delta_Temp_lower = S * log2((c0_lower + delta_CO2_lower) / c0_lower),
+    Forecasted_Avg_Global_Temp_Anomaly_Lower = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp_lower, 0)),
+
+    # Upper 95% bound
+    c0_upper = lag(CO2_upper, n = 1),
+    delta_CO2_upper = CO2_upper - c0_upper,
+    delta_Temp_upper = S * log2((c0_upper + delta_CO2_upper) / c0_upper),
+    Forecasted_Avg_Global_Temp_Anomaly_Upper = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp_upper, 0))
+  )
+
+tail(forecast_result_dcmp_ARIMA_SARIMA_climate)
+
+
+#Fix Time variable to start at 733 not 1
+# Find the last historical time value
+last_historical_time <- max(data_table_original$Time, na.rm = TRUE)
+last_historical_time
+
+# Fix the Time column in forecasted data by continuing from the last historical time
+forecast_result_dcmp_ARIMA_SARIMA_climate <- forecast_result_dcmp_ARIMA_SARIMA_climate %>%
+  mutate(Time = last_historical_time + row_number())
+
+# Verify the fix
+head(forecast_result_dcmp_ARIMA_SARIMA_climate$Time)
+
+# Merge historical and forecasted data
+combined_data <- bind_rows(
+  data_table_original %>% 
+    mutate(Source = "Historical"),
+  
+  forecast_result_dcmp_ARIMA_SARIMA_climate %>% 
+    mutate(Source = "Forecast")
+)
+
+# Ensure Forecasted_Avg_Global_Temp_Anomaly exists
+if (!"Forecasted_Avg_Global_Temp_Anomaly" %in% colnames(combined_data)) {
+  stop("Forecasted_Avg_Global_Temp_Anomaly not found in combined_data. Check dataset.")
+}
+
+# Create the Temperature Anomaly plot using autoplot
+merged_temp_plot <- autoplot(combined_data, Forecasted_Avg_Global_Temp_Anomaly) +
+
+  # 95% Confidence Interval as a shaded region
+  geom_ribbon(aes(ymin = Forecasted_Avg_Global_Temp_Anomaly_Lower, 
+                  ymax = Forecasted_Avg_Global_Temp_Anomaly_Upper), 
+              fill = "gray", alpha = 0.4) +
+  
+  # Paris Agreement Reference Lines
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red", linewidth = 1) +  
+  geom_hline(yintercept = 2.0, linetype = "dashed", color = "red", linewidth = 1) +  
+  
+  # Labels for Paris Agreement Limits
+  annotate("text", x = min(combined_data$Time, na.rm = TRUE), y = 1.55, label = "1.5°C Best Effort", 
+           color = "red", hjust = 0, size = 4) +
+  annotate("text", x = min(combined_data$Time, na.rm = TRUE), y = 2.05, label = "2.0°C Warming Limit", 
+           color = "red", hjust = 0, size = 4) +
+
+  # Titles and Labels
+  ggtitle("Global 1-Climate Ahead (20 Year) Temperature Anomaly Forecast (In-Sample & Forecast) with 95% Confidence Interval") + 
+  xlab("Time") + 
+  ylab("Temperature Anomaly (°C)") +
+
+  # Theme Customization
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Display the plot
+print(merged_temp_plot)
+```
+
+------------------------------------------------------------------------
+#Create Blended Average to smooth transition from historical to forecasted period
+```{r,fig.width=15, fig.height=8}
+# Create a new table to avoid modifying previous data
+blend_years <- 5  # Transition period in years
+blend_months <- blend_years * 12
+transition_index <- max(data_table_original$Time, na.rm = TRUE) # Last historical data index
+
+# Generate blending weights
+blending_weights <- tibble(
+  Time = (transition_index + 1):(transition_index + blend_months),
+  weight = seq(0, 1, length.out = blend_months)
+)
+
+# Create a new blended forecast table
+forecast_blended_temp <- forecast_result_dcmp_ARIMA_SARIMA_climate %>%
+  left_join(blending_weights, by = "Time") %>%
+  mutate(weight = replace_na(weight, 1)) %>%  # Ensure weights default to 1 for post-transition period
+  mutate(
+    
+    #Blended median forecast
+    Blended_Forecasted_Avg_Global_Temp_Anomaly = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly
+    ),
+    
+    # Blended Lower 95% bound
+    Blended_Forecasted_Avg_Global_Temp_Anomaly_Lower = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly_Lower,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly_Lower
+    ),
+
+    # Blended Upper 95% bound
+    Blended_Forecasted_Avg_Global_Temp_Anomaly_Upper = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly_Upper,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly_Upper
+    )
+    
+  ) %>%
+  drop_na(Blended_Forecasted_Avg_Global_Temp_Anomaly)  # Ensure no NA values remain
+
+# Merge historical and blended forecasted data into a new table
+combined_blended_data <- bind_rows(
+  data_table_original %>% mutate(Source = "Historical"),
+  forecast_blended_temp %>% mutate(Source = "Forecast")
+)
+
+# Ensure the blended variable exists
+if (!"Blended_Forecasted_Avg_Global_Temp_Anomaly" %in% colnames(combined_blended_data)) {
+  stop("Blended_Forecasted_Avg_Global_Temp_Anomaly not found in combined_blended_data. Check dataset.")
+}
+
+# Create the blended plot
+blended_temp_plot <- ggplot(combined_blended_data, aes(x = Month_index, y = Blended_Forecasted_Avg_Global_Temp_Anomaly)) +
+  
+  # Confidence Interval (Shaded Region)
+  geom_ribbon(data = combined_blended_data %>% filter(Source == "Forecast"),
+              aes(ymin = Blended_Forecasted_Avg_Global_Temp_Anomaly_Lower, 
+                  ymax = Blended_Forecasted_Avg_Global_Temp_Anomaly_Upper), 
+              fill = "gray", alpha = 0.4) +
+  
+  # Historical Temperature Anomaly
+  geom_line(data = combined_blended_data %>% filter(Source == "Historical"),
+            aes(y = Forecasted_Avg_Global_Temp_Anomaly), color = "black", linewidth = 1) +
+  
+  # Blended Temperature Forecast
+  geom_line(data = combined_blended_data %>% filter(Source == "Forecast"),
+            aes(y = Blended_Forecasted_Avg_Global_Temp_Anomaly), color = "blue", linewidth = 1) +
+  
+  # Paris Agreement Reference Lines
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red", linewidth = 1) +  
+  geom_hline(yintercept = 2.0, linetype = "dashed", color = "red", linewidth = 1) +  
+  
+  # Labels for Paris Agreement Limits
+  annotate("text", x = min(combined_blended_data$Time, na.rm = TRUE), y = 1.55, label = "1.5°C Best Effort", 
+           color = "red", hjust = 0, size = 4) +
+  annotate("text", x = min(combined_blended_data$Time, na.rm = TRUE), y = 2.05, label = "2.0°C Warming Limit", 
+           color = "red", hjust = 0, size = 4) +
+  
+  # Titles and Labels
+  ggtitle("Blended 1-Climate Ahead Global Temperature Anomaly Forecast (In-Sample & Forecast) with 95% Confidence Interval") + 
+  xlab("Time") + 
+  ylab("Temperature Anomaly (°C)") +
+  
+  # Theme Customization
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Display the blended plot
+print(blended_temp_plot)
+
+
+```
+
+```{r,fig.width=15, fig.height=8, message= FALSE, echo = FALSE, warning = FALSE, fig.show='hide'}
+# Forecast temperature until breach of 2.0 degree temperature anomaly
+
+starting_anomaly_end_of_historical = 1.17 + 0.19 #from GISS NASA
+
+months_climate2 <- 413 #until is 2/15/2039
+forecast_result_dcmp_ARIMA_SARIMA_climate2 <- result_dcmp_ARIMA_SARIMA %>% 
+  forecast(h=months_climate2, point_forecast=list(.median=median))
+
+#forecast 95% confidence intervals for temperature anomaly
+
+forecast_result_dcmp_ARIMA_SARIMA_climate2 <- forecast_result_dcmp_ARIMA_SARIMA_climate2 %>% hilo(95) %>% select(-.model) %>%
+  unpack_hilo("95%") %>%
+  rename(CO2_lower = `95%_lower`, CO2_upper = `95%_upper`, CO2_median = .median)
+
+
+forecast_result_dcmp_ARIMA_SARIMA_climate2 <- forecast_result_dcmp_ARIMA_SARIMA_climate2 %>%
+  mutate(
+    Time = row_number(),
+    c0 = lag(CO2_median, n = 1),
+    delta_CO2 = CO2_median - c0,
+    delta_Temp = S*log2((c0+delta_CO2)/c0),
+    Forecasted_Avg_Global_Temp_Anomaly = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp,0)),
+    
+    # Lower 95% bound
+    c0_lower = lag(CO2_lower, n = 1),
+    delta_CO2_lower = CO2_lower - c0_lower,
+    delta_Temp_lower = S * log2((c0_lower + delta_CO2_lower) / c0_lower),
+    Forecasted_Avg_Global_Temp_Anomaly_Lower = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp_lower, 0)),
+
+    # Upper 95% bound
+    c0_upper = lag(CO2_upper, n = 1),
+    delta_CO2_upper = CO2_upper - c0_upper,
+    delta_Temp_upper = S * log2((c0_upper + delta_CO2_upper) / c0_upper),
+    Forecasted_Avg_Global_Temp_Anomaly_Upper = starting_anomaly_end_of_historical + cumsum(replace_na(delta_Temp_upper, 0))
+  )
+
+tail(forecast_result_dcmp_ARIMA_SARIMA_climate)
+
+
+#Fix Time variable to start at 733 not 1
+# Find the last historical time value
+last_historical_time <- max(data_table_original$Time, na.rm = TRUE)
+last_historical_time
+
+# Fix the Time column in forecasted data by continuing from the last historical time
+forecast_result_dcmp_ARIMA_SARIMA_climate2 <- forecast_result_dcmp_ARIMA_SARIMA_climate2 %>%
+  mutate(Time = last_historical_time + row_number())
+
+# Verify the fix
+head(forecast_result_dcmp_ARIMA_SARIMA_climate2$Time)
+
+# Merge historical and forecasted data
+combined_data <- bind_rows(
+  data_table_original %>% 
+    mutate(Source = "Historical"),
+  
+  forecast_result_dcmp_ARIMA_SARIMA_climate2 %>% 
+    mutate(Source = "Forecast")
+)
+
+# Ensure Forecasted_Avg_Global_Temp_Anomaly exists
+if (!"Forecasted_Avg_Global_Temp_Anomaly" %in% colnames(combined_data)) {
+  stop("Forecasted_Avg_Global_Temp_Anomaly not found in combined_data. Check dataset.")
+}
+```
+
+# Visualize/Forecast Breach of Warning Limit
+
+```{r,fig.width=15, fig.height=8}
+# Use same blending variables & weights tibble as before
+
+
+# Create a new blended forecast table
+forecast_blended_temp2 <- forecast_result_dcmp_ARIMA_SARIMA_climate2 %>%
+  left_join(blending_weights, by = "Time") %>%
+  mutate(weight = replace_na(weight, 1)) %>%  # Ensure weights default to 1 for post-transition period
+  mutate(
+    Blended_Forecasted_Avg_Global_Temp_Anomaly = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly
+    ),
+    # Blended Lower 95% bound
+    Blended_Forecasted_Avg_Global_Temp_Anomaly_Lower = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly_Lower,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly_Lower
+    ),
+    # Blended Upper 95% bound
+    Blended_Forecasted_Avg_Global_Temp_Anomaly_Upper = case_when(
+      Time <= transition_index + blend_months ~ 
+        (1 - weight) * tail(data_table_original$Forecasted_Avg_Global_Temp_Anomaly, 1) + 
+        weight * Forecasted_Avg_Global_Temp_Anomaly_Upper,
+      TRUE ~ Forecasted_Avg_Global_Temp_Anomaly_Upper
+    )
+  ) %>%
+  drop_na(Blended_Forecasted_Avg_Global_Temp_Anomaly)  # Ensure no NA values remain
+
+# Merge historical and blended forecasted data into a new table
+combined_blended_data2 <- bind_rows(
+  data_table_original %>% mutate(Source = "Historical"),
+  forecast_blended_temp2 %>% mutate(Source = "Forecast")
+)
+
+# Ensure the blended variable exists
+if (!"Blended_Forecasted_Avg_Global_Temp_Anomaly" %in% colnames(combined_blended_data2)) {
+  stop("Blended_Forecasted_Avg_Global_Temp_Anomaly not found in combined_blended_data2. Check dataset.")
+}
+
+# Create the blended plot
+blended_temp_plot2 <- ggplot(combined_blended_data2, aes(x = Month_index, y = Blended_Forecasted_Avg_Global_Temp_Anomaly)) +
+  
+  # Confidence Interval (Shaded Region)
+  geom_ribbon(data = combined_blended_data2 %>% filter(Source == "Forecast"),
+              aes(ymin = Blended_Forecasted_Avg_Global_Temp_Anomaly_Lower, 
+                  ymax = Blended_Forecasted_Avg_Global_Temp_Anomaly_Upper), 
+              fill = "gray", alpha = 0.4) +
+  
+  # Historical Temperature Anomaly
+  geom_line(data = combined_blended_data2 %>% filter(Source == "Historical"),
+            aes(y = Forecasted_Avg_Global_Temp_Anomaly), color = "black", linewidth = 1) +
+  
+  # Blended Temperature Forecast
+  geom_line(data = combined_blended_data2 %>% filter(Source == "Forecast"),
+            aes(y = Blended_Forecasted_Avg_Global_Temp_Anomaly), color = "blue", linewidth = 1) +
+  
+  # Paris Agreement Reference Lines
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red", linewidth = 1) +  
+  geom_hline(yintercept = 2.0, linetype = "dashed", color = "red", linewidth = 1) +  
+  
+  # Labels for Paris Agreement Limits
+  annotate("text", x = min(combined_blended_data2$Time, na.rm = TRUE), y = 1.55, label = "1.5°C Best Effort", 
+           color = "red", hjust = 0, size = 4) +
+  annotate("text", x = min(combined_blended_data2$Time, na.rm = TRUE), y = 2.05, label = "2.0°C Warming Limit", 
+           color = "red", hjust = 0, size = 4) +
+  
+  # Titles and Labels
+  ggtitle("Blended Global Temperature Anomaly Forecast (In-Sample & Forecast)") + 
+  xlab("Time") + 
+  ylab("Temperature Anomaly (°C)") +
+  
+  # Theme Customization
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Display the blended plot
+print(blended_temp_plot2)
+
+
+```
